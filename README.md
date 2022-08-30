@@ -1,7 +1,7 @@
 # dPIR
-CBus Automation Controller: Dynamic PIR level (for the SHAC/NAC/AC2/NAC2)
+Dynamic PIR level (for the SHAC/NAC/AC2/NAC2)
 
-Set a light level when triggered by a PIR to differing set points throughout a day.
+These scripts set a light level when triggered by a PIR to differing set points throughout a day.
 
 Two scripts:
 - *Dynamic PIR*: Resident, zero sleep
@@ -9,11 +9,11 @@ Two scripts:
 
 At sunrise the target level is set to high, then lowered at a specified evening time, then lowered again at a subsequent time or when a late night scene is set. When the optional 'scene' is set then the target level will be immediately set to super-low. The late night scene is triggered elsewhere (a key?).
 
-If the group is manually set to off (or by a scene), then control of the group by this script will suspend for a given 'egress' to allow for area departure with the PIR disabled. This is useful for turning off the hall or toilet light when leaving and not having the PIR trigger immediately if in its sensing field.
+If the group is manually set to off (or by a scene), then control of the group by this script will suspend for a given 'egress' time (in seconds) to allow for area departure with the PIR disabled. This is useful for turning off the hall or toilet light when leaving and not having the PIR trigger immediately if in its sensing field.
 
 If the group is manually set to a level other than the script target (like with a switch timer) then this script will not turn it off after the script timer runtime. To re-enable the script timer function the group must be switched to off.
 
-A PIR to turn on the group must be configured to pulse a lighting group (the 'trigger' group) for approx one second, and also have a lighting group (the 'enable' group) for that PIR defined.
+A PIR to turn on the group must be configured to pulse a lighting group on motion (the 'trigger' group) for approx one second, and also have a lighting group set to enable the sensor (the 'enable' group).
 
 Set keywords for the trigger group, which will be read by this script.
 - DPIR
