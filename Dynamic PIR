@@ -48,15 +48,16 @@ and the DPIR event-based script also needs to be re-started for newly added DPIR
 Despite being zero delay, using a socket timeout results in super-low CPU usage.
 --]]
 
-logging = false
+logging = true
 
 defaultRun = '120'; defaultLv = '210/127/127'; defaultHr = '22/0'; defaultRamp = '4/8'; defaultDd = '15'; defaultScene = '' -- Defaults for trigger groups
-socketTimeout = 2 -- Inbound DPIR messages will be handled near instantly, and other script tasks will occur less frequently
+socketTimeout = 1 -- Inbound DPIR messages will be handled near instantly, and other script tasks will occur less frequently
 
 --[[
 UDP listener - receive messages from the event script 'DPIR'
 --]]
 
+if server then server:close() end -- Handle script re-entry
 server = require('socket').udp()
 server:settimeout(socketTimeout)
 server:setsockname('127.0.0.1', 5431) -- Listen on port 5431 for PIR triggers
@@ -188,7 +189,9 @@ for k, pir in pairs(pirs) do
     ', dynamic level ' .. pir.dynamicSet..
     ', level='..pir.levelHigh..'/'..pir.levelLow..'/'..pir.levelSuperLow..
     ', hour='..pir.hourLow..'/'..pir.hourSuperLow..
-    ', ramp='..pir.rampOn..'/'..pir.rampOff
+    ', ramp='..pir.rampOn..'/'..pir.rampOff..
+    ', run='..pir.runtime..
+    ', egress='..pir.egress
   )
   if GetCBusLevel(pir.net, pir.app, pir.dGroup) == pir.dynamicSet then -- If the group is currently at the dynamic level then start the timer
     logger(pir.target..' at desired level, so starting timer')
@@ -222,7 +225,10 @@ function processTrigger(alias)
         SetCBusLevel(net, app, group, dynamicSet, pir.rampOn)
         groupLevel = dynamicSet
         timerStart(alias)
-        pir.rampingOff = false
+        if pir.rampingOff then
+          pir.rampingOff = false
+          logger(pir.target..' ramping off cleared')
+        end
       else
         logger(target..' was not turned on, dynamicSet='..pir.dynamicSet..', rampingOff='..tostring(pir.rampingOff))
       end
@@ -247,6 +253,10 @@ while true do
   for alias, pir in pairs(pirs) do
     -- GET THE STATE OF GROUP
     local level = GetCBusLevel(pir.net, pir.app, pir.dGroup)
+    if pir.rampingoff and level == 0 then
+      pir.rampingOff = false
+      logger(pir.target..' ramping off cleared')
+    end
     if GetCBusTargetLevel(pir.net, pir.app, pir.dGroup) == level then groupLevel = level else groupLevel = pir.oldGroupLevel end
   
     if not pir.suspended then -- Suspension occurs to allow egress
@@ -282,6 +292,7 @@ while true do
           if groupLevel == pir.dynamicSet then
             logger(pir.target..' ramping off')
             SetCBusLevel(pir.net, pir.app, pir.dGroup, 0, pir.rampOff)
+            pir.rampingOff = true
           else
             logger(pir.target..' at unexpected level ('..groupLevel..', expected '..pir.dynamicSet..'), doing nothing (re-switching off if already off)')
             if not groupLevel then SetCBusState(pir.net, pir.app, pir.dGroup, false) end
