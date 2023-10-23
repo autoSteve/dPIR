@@ -48,15 +48,26 @@ and the DPIR event-based script also needs to be re-started for newly added DPIR
 Despite being zero delay, using a socket timeout results in super-low CPU usage.
 --]]
 
-logging = true
+local logging = false
 
-defaultRun = '120'; defaultLv = '210/127/127'; defaultHr = '22/0'; defaultRamp = '4/8'; defaultDd = '15'; defaultScene = '' -- Defaults for trigger groups
-socketTimeout = 1 -- Inbound DPIR messages will be handled near instantly, and other script tasks will occur less frequently
+-- Runtime global variable checking. Globals must be explicitly declared, which will catch variable name typos
+local declaredNames = {['vprint'] = true, ['vprinthex'] = true, ['maxgroup'] = true, }
+local function declare(name, initval) rawset(_G, name, initval) declaredNames[name] = true end
+local exclude = {['ngx'] = true, }
+setmetatable(_G, {
+  __newindex = function (t, n, v) if not declaredNames[n] then log('Warning: Write to undeclared global variable "'..n..'"') end rawset(t, n, v) end,
+  __index = function (_, n) if not exclude[n] and not declaredNames[n] then log('Warning: Read undeclared global variable "'..n..'"') end return nil end,
+})
+
+local defaultRun = '120'; local defaultLv = '210/127/127'; local defaultHr = '22/0'; local defaultRamp = '4/8'; local defaultDd = '15'; local defaultScene = '' -- Defaults for trigger groups
+local socketTimeout = 1 -- Inbound DPIR messages will be handled near instantly, and other script tasks will occur less frequently
+local pirs = {}
 
 --[[
 UDP listener - receive messages from the event script 'DPIR'
 --]]
 
+local server
 if server then server:close() end -- Handle script re-entry
 server = require('socket').udp()
 server:settimeout(socketTimeout)
@@ -66,19 +77,20 @@ server:setsockname('127.0.0.1', 5431) -- Listen on port 5431 for PIR triggers
 Utility functions
 --]]
 
-function logger(msg) if logging then log(msg) end end
+local function logger(msg) if logging then log(msg) end end
 
 require('uci')
-function calculateSunriseSunset() sunrise, sunset = rscalc(tonumber(uci.get('genohm-scada.core.latitude')), tonumber(uci.get('genohm-scada.core.longitude'))) end
+local sunrise, sunset
+local function calculateSunriseSunset() sunrise, sunset = rscalc(tonumber(uci.get('genohm-scada.core.latitude')), tonumber(uci.get('genohm-scada.core.longitude'))) end
 
-function isEmpty(s) return s == nil or s == '' end
+local function isEmpty(s) return s == nil or s == '' end
 
-timer = {}
-function timerStart(alias) timer[alias] = { timerStarted = os.time(), timerDuration = pirs[alias].runtime } end
-function timerStop(alias) timer[alias] = { timerStarted = 0, timerDuration = 0 } end
-function timerExpired(alias) return (timer[alias].timerStarted == 0) or (os.time() - timer[alias].timerStarted >= timer[alias].timerDuration) end
+local timer = {}
+local function timerStart(alias) timer[alias] = { timerStarted = os.time(), timerDuration = pirs[alias].runtime } end
+local function timerStop(alias) timer[alias] = { timerStarted = 0, timerDuration = 0 } end
+local function timerExpired(alias) return (timer[alias].timerStarted == 0) or (os.time() - timer[alias].timerStarted >= timer[alias].timerDuration) end
 
-function simulateTrigger(pir) PulseCBusLevel(pir.net, pir.app, pir.dTrigger, 255, 0, 1, 0) end -- Simulate a PIR trigger
+local function simulateTrigger(pir) PulseCBusLevel(pir.net, pir.app, pir.dTrigger, 255, 0, 1, 0) end -- Simulate a PIR trigger
 
 --[[
 Initialisation
@@ -87,17 +99,18 @@ Initialisation
 local grps = GetCBusByKW('DPIR', 'or')
 local found = {}
 local n = 0
-pirs = {}
+local k, v
 
 for k, v in pairs(grps) do
   local error = false
   local run = defaultRun; local lv = defaultLv; local hr = defaultHr; local ramp = defaultRamp; local dd = defaultDd; local scene = defaultScene -- Reset to defaults
   local net = v['address'][1]; local app = v['address'][2]; local group = v['address'][3]
   local alias = net..'/'..app..'/'..group
+  local target, en
   pirs[alias] = {}
 
   for _, t in ipairs(v['keywords']) do
-    tp = string.split(t, '=')
+    local tp = string.split(t, '=')
     tp[1] = trim(tp[1])
     if tp[2] then
       tp[2] = trim(tp[2])
@@ -160,9 +173,9 @@ end
 
 calculateSunriseSunset()
 
-now = os.date('*t')
-nowMinute = now.hour * 60 + now.min
-lastMinute = -1
+local now = os.date('*t')
+local nowMinute = now.hour * 60 + now.min
+local lastMinute = -1
 
 for k, pir in pairs(pirs) do
   timerStop(k)
@@ -209,7 +222,7 @@ log('DPIR initialised')
 PIR trigger processing
 --]]
 
-function processTrigger(alias)
+local function processTrigger(alias)
   local pir = pirs[alias]
   local target = pir.target
   if not pir.suspended then
@@ -218,7 +231,7 @@ function processTrigger(alias)
       timerStart(alias) -- Reset the timer if already running
     else
       local net = pir.net; local app = pir.app; local group = pir.dGroup; local dynamicSet = pir.dynamicSet
-      groupLevel = GetCBusLevel(net, app, group)
+      local groupLevel = GetCBusLevel(net, app, group)
       logger(target..' current level '..groupLevel)
       if groupLevel == 0 or groupLevel == dynamicSet or pir.rampingOff then -- Turn on the group and start the timer
         logger(target..' triggered, turning on')
@@ -246,7 +259,8 @@ Main loop
 
 while true do
   -- Check for new triggers
-  received = server:receive() -- Get trigger message, with timeout ... message is processed after checks below
+  local received = server:receive() -- Get trigger message, with timeout ... message is processed after checks below
+  local groupLevel
 
   now = os.date('*t'); nowMinute = now.hour * 60 + now.min
 
@@ -351,7 +365,8 @@ while true do
   if received ~= nil then processTrigger(received) end
 
   -- ADJUST TARGET GROUP DYNAMIC LIGHT LEVEL
-  function setDynamicGroupLevel(pir, level)
+  local setDR
+  local function setDynamicGroupLevel(pir, level)
     local oldLevel = pir.dynamicSet
     pir.dynamicSet = level
     if pir.dynamicSet ~= oldLevel then logger('Adjusted DPIR target '..pir.target..' dynamic level ' .. pir.dynamicSet) end
@@ -378,6 +393,7 @@ while true do
   if setDR and now.min == 1 then setDR = false end -- Reset the time-based 'set' flag
 
   -- CALCULATE SUNRISE/SUNSET ONCE PER DAY
+  local setSR
   if not setSR and now.hour == 1 and now.min == 0 then
     calculateSunriseSunset(); setSR = true
     logger('Sunrise set to: '..sunrise..', and sunset: '..sunset)
