@@ -42,10 +42,7 @@ DPIR, grp=Hutch Bathroom, en=Hutch Bathroom PIR Enable, run=300, lv=179/127, hr=
 DPIR, grp=Outside Carport, en=Outside Carport Enable, run=120, lv=205/153, hr=22, ramp=4/8, dd=15, 
 DPIR, grp=Kitchen Pantry LV, en=Kitchen Pantry PIR Enable, run=60, lv=240/180/80, hr=22/0, ramp=0/20, dd=0, 
 
-Changes to keywords are not detected (to improve performance), and require a resident script re-start,
-and the DPIR event-based script also needs to be re-started for newly added DPIR keywords.
-
-Despite being zero delay, using a socket timeout results in super-low CPU usage.
+Changes to keywords are not detected (to improve performance), and require a resident script re-start.
 --]]
 
 local logging = false
@@ -60,18 +57,20 @@ setmetatable(_G, {
 })
 
 local defaultRun = '120'; local defaultLv = '210/127/127'; local defaultHr = '22/0'; local defaultRamp = '4/8'; local defaultDd = '15'; local defaultScene = '' -- Defaults for trigger groups
-local socketTimeout = 1 -- Inbound DPIR messages will be handled near instantly, and other script tasks will occur less frequently
+local busTimeout = 1
+local received = nil
 local pirs = {}
 
 --[[
-UDP listener - receive messages from the event script 'DPIR'
+C-Bus callback
 --]]
 
-local server
-if server then server:close() end -- Handle script re-entry
-server = require('socket').udp()
-server:settimeout(socketTimeout)
-server:setsockname('127.0.0.1', 5431) -- Listen on port 5431 for PIR triggers
+local function eventCallback(event)
+  if pirs[event.dst] then if grp.getvalue(event.dst) > 0 then received = event.dst end end
+end
+
+local localbus = require('localbus').new(busTimeout) -- Set up the localbus
+localbus:sethandler('groupwrite', eventCallback)
 
 --[[
 Utility functions
@@ -258,8 +257,8 @@ Main loop
 --]]
 
 while true do
-  -- Check for new triggers
-  local received = server:receive() -- Get trigger message, with timeout ... message is processed after checks below
+  localbus:step()
+
   local groupLevel
 
   now = os.date('*t'); nowMinute = now.hour * 60 + now.min
@@ -290,7 +289,7 @@ while true do
         end
 
         -- DESIRED STATE SENSE
-        if GetCBusLevel(pir.net, pir.app, pir.dGroup) == pir.dynamicSet then
+        if level == pir.dynamicSet then
           logger(pir.target..' is at desired level of '..pir.dynamicSet)
           if timer[alias].timerStarted == 0 then
             logger(pir.target..' turned on at target level, so simulating PIR trigger')
@@ -321,7 +320,7 @@ while true do
         pir.suspended = nil
         logger(pir.target..' resumed')
       else
-        if GetCBusLevel(pir.net, pir.app, pir.dGroup) == pir.dynamicSet then -- manually switched on again, so re-trigger
+        if level == pir.dynamicSet then -- manually switched on again, so re-trigger
           pir.suspended = nil
           logger(pir.target..' turned on again before egress duration, so re-triggering PIR')
           simulateTrigger(pir)
@@ -362,7 +361,7 @@ while true do
 
   -- PROCESS ANY RECEIVED MESSAGE
   -- Done after checks above, mostly to cater for group manually turned off
-  if received ~= nil then processTrigger(received) end
+  if received ~= nil then processTrigger(received) received = nil end
 
   -- ADJUST TARGET GROUP DYNAMIC LIGHT LEVEL
   local setDR

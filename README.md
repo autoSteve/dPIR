@@ -9,10 +9,9 @@ If the group is manually set to a level other than the script target (like with 
 
 A PIR to turn on the group should be configured to pulse a lighting group (the 'trigger' group) for approx one second, and also have a lighting group (the 'enable' group) for that PIR defined.
 
-There are two scripts:
+There is a single script:
 
 - Dynamic PIR: Resident, zero delay
-- DPIR: Event-based, on keyword "DPIR"
 
 Set keywords for the trigger group, which will be read by this script.
 - DPIR
@@ -34,4 +33,4 @@ Keyword examples, applied to each PIR trigger group:
 - DPIR, grp=Outside Carport, en=Outside Carport Enable, run=120, lv=205/153, hr=22, ramp=4/8, dd=15, 
 - DPIR, grp=Kitchen Pantry LV, en=Kitchen Pantry PIR Enable, run=60, lv=240/180/80, hr=22/0, ramp=0/20, dd=0, 
 
-Note: Changes to keywords are not detected (to improve performance), and require a resident script re-start, and the DPIR event-based script also needs to be re-started for newly added DPIR keywords (otherwise it will not fire for those new groups).
+Note: Changes to keywords are not detected (to improve performance), and require a resident script re-start.
