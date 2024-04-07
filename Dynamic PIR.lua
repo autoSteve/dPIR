@@ -60,13 +60,29 @@ local defaultRun = '120'; local defaultLv = '210/127/127'; local defaultHr = '22
 local busTimeout = 1
 local received = nil
 local pirs = {}
+local targets = {}
 
 --[[
 C-Bus callback
 --]]
 
 local function eventCallback(event)
-  if pirs[event.dst] then if grp.getvalue(event.dst) > 0 then received = event.dst end end
+  if pirs[event.dst] then if grp.getvalue(event.dst) > 0 then received = event.dst return end end
+  if targets[event.dst] then
+    local level = tonumber(string.sub(event.datahex,1,2),16)
+    local ramp = tonumber(string.sub(event.datahex,7,8),16)
+    if event.sender == 'cl' then -- Script initiated a ramp
+      if ramp > 0  then -- Ramp begin
+        targets[event.dst].targetLevel = tonumber(string.sub(event.datahex,3,4),16)
+        targets[event.dst].ramping = true
+        return
+      end
+      targets[event.dst].level = level
+    else
+      targets[event.dst].level = level
+      if level == targets[event.dst].targetLevel then targets[event.dst].ramping = false targets[event.dst].targetLevel = -1 end -- Ramp end
+    end
+  end
 end
 
 local localbus = require('localbus').new(busTimeout) -- Set up the localbus
@@ -75,8 +91,6 @@ localbus:sethandler('groupwrite', eventCallback)
 --[[
 Utility functions
 --]]
-
-local function logger(msg) if logging then log(msg) end end
 
 require('uci')
 local sunrise, sunset
@@ -130,6 +144,7 @@ for k, v in pairs(grps) do
     dGroup = GetCBusGroupAddress(net, app, target),
     dTrigger = group,
     dTriggerEn = GetCBusGroupAddress(net, app, en),
+    dTriggerAlias = net..'/'..app..'/'..GetCBusGroupAddress(net, app, en),
     runtime = tonumber(run),
     egress = tonumber(dd),
     scene = scene
@@ -180,6 +195,11 @@ for k, pir in pairs(pirs) do
   timerStop(k)
 
   pir.target = pir.net..'/'..pir.app..'/'..pir.dGroup
+  targets[pir.target] = {
+    targetLevel = -1,
+    level = grp.getvalue(pir.target),
+    ramping = false
+  }
   SetCBusState(pir.net, pir.app, pir['dTriggerEn'], true)
   pir.dynamicSet = pir.levelHigh
 
@@ -196,7 +216,7 @@ for k, pir in pairs(pirs) do
     end
   end
 
-  logger(
+  if logging then log(
     'Initialised DPIR target '..pir.target..
     ', dynamic level ' .. pir.dynamicSet..
     ', level='..pir.levelHigh..'/'..pir.levelLow..'/'..pir.levelSuperLow..
@@ -204,14 +224,14 @@ for k, pir in pairs(pirs) do
     ', ramp='..pir.rampOn..'/'..pir.rampOff..
     ', run='..pir.runtime..
     ', egress='..pir.egress
-  )
+  ) end
   if GetCBusLevel(pir.net, pir.app, pir.dGroup) == pir.dynamicSet then -- If the group is currently at the dynamic level then start the timer
-    logger(pir.target..' at desired level, so starting timer')
+    if logging then log(pir.target..' at desired level, so starting timer') end
     timerStart(k)
   end
   pir.lateNightSet = false
   pir.suspended = nil
-  pir.oldGroupLevel = GetCBusLevel(pir.net, pir.app, pir.dGroup)
+  pir.oldGroupLevel = grp.getvalue(pir.target)
 end
 
 log('DPIR initialised')
@@ -226,28 +246,26 @@ local function processTrigger(alias)
   local target = pir.target
   if not pir.suspended then
     if timer[alias].timerStarted > 0 then
-      logger(target..' triggered, reset timer')
+      if logging then log(target..' triggered, reset timer') end
       timerStart(alias) -- Reset the timer if already running
     else
-      local net = pir.net; local app = pir.app; local group = pir.dGroup; local dynamicSet = pir.dynamicSet
-      local groupLevel = GetCBusLevel(net, app, group)
-      logger(target..' current level '..groupLevel)
-      if groupLevel == 0 or groupLevel == dynamicSet or pir.rampingOff then -- Turn on the group and start the timer
-        logger(target..' triggered, turning on')
-        SetCBusLevel(net, app, group, dynamicSet, pir.rampOn)
-        groupLevel = dynamicSet
+      local groupLevel = targets[target].level
+      if groupLevel == 0 or groupLevel == pir.dynamicSet or pir.rampingOff then -- Turn on the group and start the timer
+        if logging then log(target..' triggered, turning on') end
+        SetCBusLevel(pir.net, pir.app, pir.dGroup, pir.dynamicSet, pir.rampOn)
+        groupLevel = pir.dynamicSet
         timerStart(alias)
         if pir.rampingOff then
           pir.rampingOff = false
-          logger(pir.target..' ramping off cleared')
+          if logging then log(pir.target..' ramping off cleared') end
         end
       else
-        logger(target..' was not turned on, dynamicSet='..pir.dynamicSet..', rampingOff='..tostring(pir.rampingOff))
+        if logging then log(target..' was not turned on, dynamicSet='..pir.dynamicSet..', rampingOff='..tostring(pir.rampingOff)) end
       end
       pir.groupLevel = groupLevel
     end
   else
-    logger(target..' suspended, doing nothing')
+    if logging then log(target..' suspended, doing nothing') end
   end
 end
     
@@ -256,43 +274,47 @@ end
 Main loop
 --]]
 
+local setDR = false
+local setSR = false
+
 while true do
   localbus:step()
 
   local groupLevel
 
-  now = os.date('*t'); nowMinute = now.hour * 60 + now.min
+  now = os.date('*t')
 
   for alias, pir in pairs(pirs) do
-    -- GET THE STATE OF GROUP
-    local level = GetCBusLevel(pir.net, pir.app, pir.dGroup)
-    if pir.rampingoff and level == 0 then
+    local level = targets[pir.target].level
+
+    if pir.rampingOff and level == 0 then
       pir.rampingOff = false
-      logger(pir.target..' ramping off cleared')
+      if logging then log(pir.target..' ramping off cleared') end
     end
-    if GetCBusTargetLevel(pir.net, pir.app, pir.dGroup) == level then groupLevel = level else groupLevel = pir.oldGroupLevel end
+    if not targets[pir.target].ramping then groupLevel = level else groupLevel = pir.oldGroupLevel end
   
     if not pir.suspended then -- Suspension occurs to allow egress
       if (groupLevel ~= pir.oldGroupLevel) then
-        -- logger('Group change, old='..pir.oldGroupLevel..', new='..groupLevel)
+        -- if logging then log('Group change, old='..pir.oldGroupLevel..', new='..groupLevel) end
         pir.oldGroupLevel = groupLevel
 
         -- CHECK FOR GROUP TURNED OFF
         if timer[alias].timerStarted > 0 and groupLevel == 0 then
-          logger(pir.target..' has been turned off')
-          if GetCBusState(pir.net, pir.app, pir.dTriggerEn) then
+          if logging then log(pir.target..' has been turned off') end
+          if grp.getvalue(pir.dTriggerAlias) > 0 then
             PulseCBusLevel(pir.net, pir.app, pir.dTriggerEn, 0, 0, pir.egress, 255)
-            logger(pir.target..' stopping timer and delaying '..pir.egress..' seconds')
+            if logging then log(pir.target..' stopping timer and delaying '..pir.egress..' seconds') end
             timerStop(alias)
+            received = nil -- Clear any pending triggers
             pir.suspended = os.time() -- Suspend trigger detection until the end of the disable duration, as no point running
           end
         end
 
         -- DESIRED STATE SENSE
         if level == pir.dynamicSet then
-          logger(pir.target..' is at desired level of '..pir.dynamicSet)
+          if logging then log(pir.target..' is at desired level of '..pir.dynamicSet) end
           if timer[alias].timerStarted == 0 then
-            logger(pir.target..' turned on at target level, so simulating PIR trigger')
+            if logging then log(pir.target..' turned on at target level, so simulating PIR trigger') end
             simulateTrigger(pir)
           end
         end
@@ -301,14 +323,14 @@ while true do
       -- CHECK FOR TIMER EXPIRY
       if timer[alias].timerStarted > 0 then
         if timerExpired(alias) then
-          logger(pir.target..' timer expired')
+          if logging then log(pir.target..' timer expired') end
           if groupLevel == pir.dynamicSet then
-            logger(pir.target..' ramping off')
+            if logging then log(pir.target..' ramping off') end
             SetCBusLevel(pir.net, pir.app, pir.dGroup, 0, pir.rampOff)
             pir.rampingOff = true
           else
-            logger(pir.target..' at unexpected level ('..groupLevel..', expected '..pir.dynamicSet..'), doing nothing (re-switching off if already off)')
-            if not groupLevel then SetCBusState(pir.net, pir.app, pir.dGroup, false) end
+            if logging then log(pir.target..' at unexpected level ('..groupLevel..', expected '..pir.dynamicSet..'), doing nothing (re-switching off if already off)') end
+            if not groupLevel then grp.setlevel(pir.target) end
           end
           timerStop(alias)
         end
@@ -318,11 +340,11 @@ while true do
       -- PIR IS SUSPENDED...
       if os.time() - pir.suspended >= pir.egress then
         pir.suspended = nil
-        logger(pir.target..' resumed')
+        if logging then log(pir.target..' resumed') end
       else
         if level == pir.dynamicSet then -- manually switched on again, so re-trigger
           pir.suspended = nil
-          logger(pir.target..' turned on again before egress duration, so re-triggering PIR')
+          if logging then log(pir.target..' turned on again before egress duration, so re-triggering PIR') end
           simulateTrigger(pir)
         end
       end
@@ -334,7 +356,7 @@ while true do
       if not pir.lateNightSet and sceneSet then
         pir.lateNightSet = true
         pir.dynamicSet = pir.levelSuperLow
-        logger(pir.target..' adjusted for late night mode at level '..pir.dynamicSet)
+        if logging then log(pir.target..' adjusted for late night mode at level '..pir.dynamicSet) end
         if groupLevel > 0 and timer[alias].timerStarted > 0 then -- Group is on, so adjust it
           simulateTrigger(pir)
           pir.rampingOff = true
@@ -342,18 +364,19 @@ while true do
       else
         if pir.lateNightSet and (not sceneSet) then
           pir.lateNightSet = false
-          logger(pir.target..' late night mode off')
+          if logging then log(pir.target..' late night mode off') end
           if pir.hourLow * 60 > sunrise then -- i.e. Low is before midnight
             if now.hour < pir.hourLow then pir.dynamicSet = pir.levelHigh else pir.dynamicSet = pir.levelLow end
             if pir.hourSuperLow > pir.hourLow and now.hour >= pir.hourSuperLow then pir.dynamicSet = pir.levelSuperLow end
           else
             pir.dynamicSet = pir.levelHigh
+            nowMinute = now.hour * 60 + now.min
             if nowMinute < sunrise then
               if nowMinute >= pir.hourLow * 60 then pir.dynamicSet = pir.levelLow end
               if nowMinute >= pir.hourSuperLow * 60 then pir.dynamicSet = pir.levelSuperLow end
             end
           end
-          logger(pir.target..' adjusted dynamic level to '..pir.dynamicSet)
+          if logging then log(pir.target..' adjusted dynamic level to '..pir.dynamicSet) end
         end
       end
     end
@@ -364,38 +387,33 @@ while true do
   if received ~= nil then processTrigger(received) received = nil end
 
   -- ADJUST TARGET GROUP DYNAMIC LIGHT LEVEL
-  local setDR
   local function setDynamicGroupLevel(pir, level)
     local oldLevel = pir.dynamicSet
     pir.dynamicSet = level
-    if pir.dynamicSet ~= oldLevel then logger('Adjusted DPIR target '..pir.target..' dynamic level ' .. pir.dynamicSet) end
-    setDR = true
-    if GetCBusLevel(pir.net, pir.app, pir.dGroup) > 0 then -- Lights are on, so set the new level and start the timer
+    if pir.dynamicSet ~= oldLevel then if logging then log('Adjusted DPIR target '..pir.target..' dynamic level ' .. pir.dynamicSet) end end
+    if targets[pir.target].level > 0 then -- Lights are on, so set the new level and start the timer
       SetCBusLevel(pir.net, pir.app, pir.dGroup, pir.dynamicSet, pir.rampOn)
       simulateTrigger(pir)
     end
   end
-  if not setDR and now.min ~= lastMinute then -- check for change every minute
+  if now.min ~= lastMinute and not setDR then -- check for change every minute
     lastMinute = now.min
-    for alias, pir in pairs(pirs) do
-      if nowMinute == sunrise then -- Reset to high at sunrise
-        setDynamicGroupLevel(pir, pir.levelHigh)
-      end
-      if now.min == 0 then -- check transition to low/super low
-        -- Set to low if the right hour, unless already at super-low because of scene trigger
-        if now.hour == pir.hourLow then if pir.dynamicSet ~= pir.levelSuperLow then setDynamicGroupLevel(pir, pir.levelLow) end end
-        -- Set to super-low if the right hour
-        if now.hour == pir.hourSuperLow then setDynamicGroupLevel(pir, pir.levelSuperLow) end
+    nowMinute = now.hour * 60 + now.min
+    if nowMinute == sunrise then -- Reset to high at sunrise
+      setDR = true
+      for alias, pir in pairs(pirs) do setDynamicGroupLevel(pir, pir.levelHigh) end
+    end
+    if now.min == 0 then -- check transition to low/super low
+      setDR = true
+      for alias, pir in pairs(pirs) do
+        if now.hour == pir.hourLow then if pir.dynamicSet ~= pir.levelSuperLow then setDynamicGroupLevel(pir, pir.levelLow) end end -- Set to low if the right hour, unless already at super-low because of scene trigger
+        if now.hour == pir.hourSuperLow then setDynamicGroupLevel(pir, pir.levelSuperLow) end -- Set to super-low if the right hour
       end
     end
   end
   if setDR and now.min == 1 then setDR = false end -- Reset the time-based 'set' flag
 
   -- CALCULATE SUNRISE/SUNSET ONCE PER DAY
-  local setSR
-  if not setSR and now.hour == 1 and now.min == 0 then
-    calculateSunriseSunset(); setSR = true
-    logger('Sunrise set to: '..sunrise..', and sunset: '..sunset)
-  end
+  if now.hour == 1 and now.min == 0 and not setSR then calculateSunriseSunset() setSR = true if logging then log('Sunrise set to: '..sunrise..', and sunset: '..sunset) end end
   if setSR and now.min == 1 then setSR = false end -- Reset the time-based 'set' flag
 end
