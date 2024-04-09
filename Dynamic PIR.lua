@@ -67,9 +67,9 @@ C-Bus callback
 --]]
 
 local function eventCallback(event)
-  if pirs[event.dst] then if grp.getvalue(event.dst) > 0 then received = event.dst return end end
+  local level = tonumber(string.sub(event.datahex,1,2),16)
+  if pirs[event.dst] then if level > 0 then received = event.dst return end end
   if targets[event.dst] then
-    local level = tonumber(string.sub(event.datahex,1,2),16)
     local ramp = tonumber(string.sub(event.datahex,7,8),16)
     if event.sender == 'cl' then -- Script initiated a ramp
       if ramp > 0  then -- Ramp begin
