@@ -215,6 +215,7 @@ for k, pir in pairs(pirs) do
       if nowMinute >= pir.hourSuperLow * 60 then pir.dynamicSet = pir.levelSuperLow end -- Super-low must be after low
     end
   end
+  pir.oldDynamicSet = pir.dynamicSet
 
   if logging then log(
     'Initialised DPIR target '..pir.target..
@@ -329,8 +330,14 @@ while true do
             SetCBusLevel(pir.net, pir.app, pir.dGroup, 0, pir.rampOff)
             pir.rampingOff = true
           else
-            if logging then log(pir.target..' at unexpected level ('..groupLevel..', expected '..pir.dynamicSet..'), doing nothing (re-switching off if already off)') end
-            if not groupLevel then grp.setlevel(pir.target) end
+            if groupLevel == pir.oldDynamicSet then
+              if logging then log(pir.target..' at prior expected level ('..groupLevel..', so setting to target level and simulating a trigger') end
+              SetCBusLevel(pir.net, pir.app, pir.dGroup, pir.dynamicSet, pir.rampOn)
+              simulateTrigger(pir)
+            else
+              if logging then log(pir.target..' at unexpected level ('..groupLevel..', expected '..pir.dynamicSet..'), doing nothing (re-switching off if already off)') end
+              if not groupLevel then grp.setlevel(pir.target) end
+            end
           end
           timerStop(alias)
         end
@@ -391,6 +398,7 @@ while true do
     local oldLevel = pir.dynamicSet
     pir.dynamicSet = level
     if pir.dynamicSet ~= oldLevel then if logging then log('Adjusted DPIR target '..pir.target..' dynamic level ' .. pir.dynamicSet) end end
+    pir.oldDynamicSet = oldLevel
     if targets[pir.target].level > 0 then -- Lights are on, so set the new level and start the timer
       SetCBusLevel(pir.net, pir.app, pir.dGroup, pir.dynamicSet, pir.rampOn)
       simulateTrigger(pir)
